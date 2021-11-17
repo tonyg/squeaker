@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+
+from pathlib import Path
+from urllib.request import Request, urlopen
+import argparse
+import hashlib
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+
+import logging
+
+def ensuredir(*pieces):
+    p = os.path.join(*pieces)
+    Path(p).mkdir(parents=True, exist_ok=True)
+    return p
+
+def cachedir():
+    base = os.environ.get('XDG_CACHE_HOME', os.path.join(Path.home(), '.cache'))
+    return os.path.join(base, 'squeaker')
+
+def ensurecachedir(*pieces):
+    return ensuredir(cachedir(), *pieces)
+
+def digest(s):
+    return hashlib.sha512(s.encode('utf-8')).hexdigest()
+
+def digest_file(path):
+    d = hashlib.sha512()
+    with open(path, 'rb') as f:
+        while True:
+            buf = f.read(524288)
+            if not buf:
+                return d.hexdigest()
+            d.update(buf)
+
+def digest_digests(digests):
+    d = hashlib.sha512()
+    for item in digests:
+        d.update(bytearray.fromhex(item))
+    return d.hexdigest()
+
+def copy_with_progress(expected_str, from_fh, to_fh, extra=''):
+    expected = int(expected_str) if expected_str is not None else None
+    block_size = math.ceil(expected / 100) if expected is not None else 131072
+    total = 0
+    def status():
+        return f'  {total}/{expected} ({math.floor(100.0 * (total/expected)) if expected is not None else "?"}%){extra}'
+    while True:
+        logging.info('\r' + status())
+        buf = from_fh.read(block_size)
+        if not buf:
+            break
+        total = total + len(buf)
+        to_fh.write(buf)
+    logging.info('\r' + status() + '\n')
+
+def stage_cache_lookup(no_cache, stage_type, stage_key, if_absent, extra):
+    full_stage = f'{stage_type}\n{stage_key}'
+    full_stage_digest = digest(full_stage)
+    infopath = os.path.join(ensurecachedir('stages'), full_stage_digest)
+    logging.debug(f'stage cache check for {infopath}, type {stage_type}')
+
+    if os.path.exists(infopath):
+        if stage_type in no_cache:
+            logging.info(f'Ignoring (and replacing) stage cache entry for {full_stage_digest[:20]}')
+        else:
+            logging.debug(f'  cache hit')
+            with open(infopath, 'rt') as f:
+                ir = ImageRef.for_digest(json.load(f)['image_digest'])
+                if os.path.exists(ir.path):
+                    return ir
+                else:
+                    logging.warning(f'Cached image {ir.digest} is missing!')
+    else:
+        logging.debug(f'  cache miss')
+
+    with tempfile.NamedTemporaryFile(prefix='squeaker-stage-') as output:
+        if_absent(output)
+        output.flush()
+        ir = ImageRef.for_digest(digest_file(output.name))
+        shutil.copyfile(output.name, ir.path)
+    with open(infopath, 'wt') as f:
+        info = {
+            'image_digest': ir.digest,
+            'stage_type': stage_type,
+            'stage_key': stage_key,
+        }
+        for (k, v) in extra.items():
+            info[k] = v
+        json.dump(info, f, indent=2)
+    return ir
+
+def download(no_cache, url):
+    req = Request(url)
+    if req.type == 'file':
+        path = req.selector
+        logging.debug('local file ' + repr(path))
+        h = digest_file(path)
+        return ImageRef(h, path)
+    else:
+        def if_absent(output):
+            resp = urlopen(req)
+            if resp.status >= 200 and resp.status <= 299:
+                logging.info(f'Downloading {url}')
+                copy_with_progress(expected_str=resp.headers['content-length'], from_fh=resp, to_fh=output, extra=' ' + url)
+            else:
+                raise Exception(f'Could not retrieve {url}: HTTP response code {resp.status}:\n{resp.headers}')
+        return stage_cache_lookup(no_cache, 'url', url, if_absent, {})
+
+def tag_path(tag):
+    return os.path.join(ensurecachedir('tags'), tag)
+
+def resolve_tag(tag):
+    path = tag_path(tag)
+    if os.path.exists(path):
+        with open(path, 'rt') as f:
+            return ImageRef.for_digest(json.load(f)['image_digest'])
+    raise Exception(f'Could not resolve tag {repr(tag)}')
+
+def write_tag(ir, tag, extra):
+    logging.info(f'Tagging {ir} as {repr(tag)}')
+    with open(tag_path(tag), 'wt') as f:
+        info = {
+            'image_digest': ir.digest,
+            'tag': tag,
+        }
+        for (k, v) in extra.items():
+            info[k] = v
+        json.dump(info, f, indent=2)
+
+def extract_with_progress(z, entryname, targetname):
+    info = z.getinfo(entryname)
+    with z.open(entryname, 'r') as from_fh:
+        with open(targetname, 'wb') as to_fh:
+            copy_with_progress(str(info.file_size), from_fh=from_fh, to_fh=to_fh, extra=' extracting: ' + entryname)
+
+def archive_with_progress(z, sourcename, entryname):
+    with open(sourcename, 'rb') as from_fh:
+        with z.open(entryname, 'w') as to_fh:
+            copy_with_progress(str(os.path.getsize(sourcename)), from_fh=from_fh, to_fh=to_fh, extra=' archiving: ' + entryname)
+
+def prepare_base(path):
+    z = zipfile.ZipFile(path)
+    names = z.namelist()
+    imagename = next((n for n in names if n.endswith('.image')), None)
+    if imagename is None:
+        raise Exception(f'Base image zip file does not include any *.image files')
+    changesname = imagename[:-6] + '.changes'
+    if changesname not in names:
+        raise Exception(f'Base image zip file contains image {repr(imagename)} but not {repr(changesname)}')
+    extract_with_progress(z, imagename, 'squeak.image')
+    extract_with_progress(z, changesname, 'squeak.changes')
+
+def report_time(label, action):
+    start_time = time.monotonic()
+    result = action()
+    end_time = time.monotonic()
+    logging.info(f'    {label}: {round(end_time - start_time, 3)} seconds')
+    return result
+
+def escape_str(chunk):
+    return "'" + chunk.replace("!", "!!").replace("'", "''") + "'"
+
+def incorporate_chunk(args, chunk):
+    script_body = f'''
+[
+    | oldRedirect buildDir logAndQuit |
+    buildDir := FileStream detectFile: [FileStream readOnlyFileNamed: 'squeakerDirectory'] do: [:f | f upToEnd].
+    FileDirectory setDefaultDirectory: buildDir.
+    oldRedirect := TranscriptStream redirectToStdOut.
+    TranscriptStream redirectToStdOut: true.
+    logAndQuit := [:exn |
+        FileStream stderr nextPut: Character cr.
+        exn printVerboseOn: FileStream stderr.
+        FileStream stderr flush.
+        Smalltalk snapshot: false andQuitWithExitCode: 1].
+    [
+        (
+            [
+                [
+                    Compiler evaluate: {escape_str('['+chunk+']')}
+                ] on: SyntaxErrorNotification do: logAndQuit
+            ] on: UndeclaredVariableWarning do: [:w |
+                w defaultAction.
+                Smalltalk snapshot: false andQuitWithExitCode: 1
+            ]
+        ) value
+    ] on: UnhandledError do: [:exn | logAndQuit value: exn exception].
+    Transcript flush.
+    TranscriptStream redirectToStdOut: oldRedirect.
+    Smalltalk garbageCollect; snapshot: true andQuit: true.
+] forkAt: Processor lowestPriority + 1 "plus one to avoid having the idle process starve us".
+'''
+    with open('squeakerDirectory', 'wt') as squeakerDirectory:
+        squeakerDirectory.write(args.directory)
+    with tempfile.NamedTemporaryFile(prefix='chunk-', suffix='.st') as script:
+        script.write(script_body.encode('utf-8'))
+        script.flush()
+        c = subprocess.run(
+            [args.vm, *(['-vm-display-null'] if args.headless else []), 'squeak.image', script.name],
+            check=True)
+
+def make_archive(output):
+    with zipfile.ZipFile(output, mode='w', compression=zipfile.ZIP_DEFLATED) as z:
+        archive_with_progress(z, 'squeak.image', 'squeak.image')
+        archive_with_progress(z, 'squeak.changes', 'squeak.changes')
+
+def apply_chunk(args, base_image_ref, chunk):
+    stage_digest = digest_digests([base_image_ref.digest, digest(args.vm), digest(chunk)])
+    def if_absent(output):
+        with tempfile.TemporaryDirectory(prefix='squeaker-build-') as builddirname:
+            os.chdir(builddirname)
+            prepare_base(base_image_ref.path)
+            report_time('execution', lambda: incorporate_chunk(args, chunk))
+            report_time('archiving', lambda: make_archive(output))
+            os.chdir(args.directory)
+    return stage_cache_lookup(args.no_cache, 'stage', stage_digest, if_absent, {
+        'base_image_digest': base_image_ref.digest,
+        'vm': args.vm,
+        'chunk': chunk,
+    })
+
+class ImageRef:
+    def __init__(self, digest, path):
+        self.digest = digest
+        self.path = path
+
+    def __repr__(self):
+        return f'{self.digest[:20]}'
+
+    @staticmethod
+    def for_digest(digest):
+        return ImageRef(digest, os.path.join(ensurecachedir('images'), digest))
+
+class ChunkReader:
+    def __init__(self, fh):
+        self.fh = fh
+        self.buf = None
+
+    def peek(self):
+        if self.buf is None:
+            self.buf = self.fh.read(1)
+        return self.buf
+
+    def drop(self):
+        self.buf = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        chunk = b''
+        while self.peek() != b'':
+            if self.peek() == b'!':
+                self.drop()
+                if self.peek() == b'!':
+                    self.drop()
+                    chunk = chunk + b'!'
+                else:
+                    return chunk.decode('utf-8')
+            else:
+                chunk = chunk + self.peek()
+                self.drop()
+        if chunk == b'':
+            raise StopIteration
+        else:
+            return chunk.decode('utf-8')
+
+def lex_string_literal(s):
+    if not (s[0] == "'" and s[-1] == "'"):
+        return None
+    s = s[1:-1]
+    s = s.replace("''", "'")
+    return s
+
+def lex_symbol(s):
+    if s[0] != '#':
+        return None
+    return lex_string_literal(s[1:])
+
+def command_build(args):
+    args.directory = os.path.abspath(args.directory)
+    os.chdir(args.directory)
+
+    base_image_ref = None
+
+    with open(args.f, 'rb') as squeakerfile:
+        for chunk in ChunkReader(squeakerfile):
+            chunk = chunk.strip()
+
+            if chunk.startswith('from:'):
+                loc = chunk[5:].strip()
+
+                lit = lex_string_literal(loc)
+                if lit is not None:
+                    base_image_ref = download(args.no_cache, lit)
+                    continue
+
+                srctag = lex_symbol(loc)
+                if srctag is not None:
+                    base_image_ref = resolve_tag(srctag)
+                    continue
+
+                raise Exception('Cannot resolve "from:" specifier: ', repr(loc))
+            elif chunk == '':
+                pass
+            else:
+                if base_image_ref is None:
+                    raise Exception('No "from:" specifier given')
+                logging.info(f' --- {base_image_ref}')
+                logging.info(('\n' + chunk.replace('\r', '\n')).replace('\n', '\n    '))
+                base_image_ref = apply_chunk(args, base_image_ref, chunk)
+
+    if args.t and base_image_ref is not None:
+        write_tag(base_image_ref, args.t, {})
+
+def command_run(args):
+    ir = resolve_tag(args.image)
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix='squeaker-run-') as rundirname:
+        try:
+            os.chdir(rundirname)
+            prepare_base(ir.path)
+            subprocess.run(
+                [args.vm, *(['-vm-display-null'] if args.headless else []), 'squeak.image', *args.args],
+                check=True)
+        finally:
+            os.chdir(old_cwd)
+
+def command_gc(args):
+    root_images = set()
+    marked_images = set()
+    marked_stages = set()
+
+    image_info = {}
+
+    stagedir = ensurecachedir('stages')
+    for stagefile in os.listdir(stagedir):
+        with open(os.path.join(stagedir, stagefile), 'rt') as f:
+            info = json.load(f)
+        image_info.setdefault(info['image_digest'], []).append(info)
+
+    tagdir = ensurecachedir('tags')
+    for tag in os.listdir(tagdir):
+        with open(os.path.join(tagdir, tag), 'rt') as f:
+            info = json.load(f)
+
+    print(args)
+    print(json.dumps(image_info, indent=2))
+
+class CustomHandler(logging.StreamHandler):
+    def emit(self, record):
+        if record.msg[0] == '\r':
+            record.msg = record.msg[1:]
+            self.stream.write('\r')
+            if record.msg[-1] == '\n':
+                self.terminator = '\n'
+                record.msg = record.msg[:-1]
+            else:
+                self.terminator = ''
+        else:
+            if self.terminator == '':
+                self.stream.write('\n')
+            self.terminator = '\n'
+        return super().emit(record)
+
+def main(argv):
+    app_name = os.path.basename(argv[0])
+    argv = argv[1:]
+
+    parser = argparse.ArgumentParser(prog=app_name)
+    parser.add_argument('-d', '--debug', action='store_true', default=False,
+                        help='Enable debug logging')
+    parser.set_defaults(handler=lambda args: parser.print_help())
+    sp = parser.add_subparsers()
+
+    p = sp.add_parser('build', help='Build image')
+    p.add_argument('-f', metavar='Squeakerfile.st', type=str, default='Squeakerfile.st',
+                   help='Specify Squeakerfile to use in <directory>')
+    p.add_argument('-t', metavar='tag', type=str, default=None,
+                   help='Optionally tag the produced image with this name')
+    p.add_argument('--no-cache-urls', dest='no_cache', action='append_const', const='url',
+                   help='Always redownload from URLs')
+    p.add_argument('--no-cache-stages', dest='no_cache', action='append_const', const='stage',
+                   help='Always recompute build stages')
+    p.add_argument('--no-headless', dest='headless', action='store_false', default=True,
+                   help='Run squeak in graphical mode, showing the window')
+    p.add_argument('--vm', type=str, default='squeak',
+                   help='Specify VM executable name')
+    p.add_argument('directory', type=str,
+                   help='Directory to build the image in')
+    p.set_defaults(no_cache=[], handler=command_build)
+
+    p = sp.add_parser('run', help='Run image')
+    p.add_argument('--vm', type=str, default='squeak',
+                   help='Specify VM executable name')
+    p.add_argument('--headless', dest='headless', action='store_true', default=False,
+                   help='Run squeak with a dummy display, not showing the window')
+    p.add_argument('image')
+    p.add_argument('args', nargs=argparse.REMAINDER)
+    p.set_defaults(handler=command_run)
+
+    p = sp.add_parser('gc', help='Garbage-collect images, stages etc.')
+    p.add_argument('--delete-urls', dest='delete_urls', action='store_true', default=False,
+                   help='Delete downloaded image files')
+    p.add_argument('--no-delete-stages', dest='delete_stages', action='store_false', default=True,
+                   help='Do not delete any intermediate stages')
+    p.add_argument('--delete-all-stages', dest='delete_stages', action='store_const', const='all',
+                   help='Delete all intermediate stages')
+    p.set_defaults(handler=command_gc)
+
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
+                        handlers=[CustomHandler()])
+    try:
+        args.handler(args)
+    except Exception as e:
+        logging.error(str(e), exc_info=e if args.debug else False)
+        sys.exit(1)
+
+if __name__=='__main__':
+    main(sys.argv)

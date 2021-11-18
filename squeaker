@@ -167,6 +167,19 @@ def load_tag(tag, missing_ok=False):
         return None
     raise Exception(f'Could not load tag {repr(tag)}')
 
+def resolve_tag_or_image(image):
+    info = load_tag(image, missing_ok=True)
+    if info is None:
+        matches = glob.glob(image_path(image + '*'))
+        print(matches)
+        if len(matches) == 1:
+            info = {'image_digest': os.path.basename(matches[0])}
+        elif len(matches) > 1:
+            raise Exception(f'Ambiguous image specifier: {repr(image)}')
+    if info is None:
+        raise Exception(f'Could not resolve tag or image {repr(image)}')
+    return info
+
 def pretty_stage(stage):
     return stage['image_digest'][:20]
 
@@ -183,6 +196,9 @@ def write_tag(stage, tag, extra):
         json.dump(info, f, indent=2)
 
 def extract_with_progress(z, entryname, targetname):
+    if os.path.exists(targetname):
+        logging.warning(f'{targetname} exists, not overwriting')
+        return
     info = z.getinfo(entryname)
     with z.open(entryname, 'r') as from_fh:
         with open(targetname, 'wb') as to_fh:
@@ -320,7 +336,7 @@ def apply_chunk(args, base_stage, chunk):
         'vm': args.vm,
         'chunk': chunk,
     })
-    if was_cached:
+    if was_cached and args.verbose > 0:
         logging.info(f' >>> image {pretty_stage(info)}, stage {info["stage_digest"][:20]}')
         logging.info(('     is the cached result of command(s):\n' + chunk.replace('\r', '\n')).replace('\n', '\n    '))
     return info
@@ -409,17 +425,7 @@ def command_build(args):
         print(base_stage['image_digest'])
 
 def command_run(args):
-    info = load_tag(args.image, missing_ok=True)
-    if info is None:
-        matches = glob.glob(image_path(args.image + '*'))
-        print(matches)
-        if len(matches) == 1:
-            info = {'image_digest': os.path.basename(matches[0])}
-        elif len(matches) > 1:
-            raise Exception(f'Ambiguous image specifier: {repr(args.image)}')
-    if info is None:
-        raise Exception(f'Could not resolve tag or image {repr(args.image)}')
-
+    info = resolve_tag_or_image(args.image)
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory(prefix='squeaker-run-') as rundirname:
         try:
@@ -527,6 +533,17 @@ def command_dot(args):
             pass
     print('}')
 
+def command_create(args):
+    args.targetdirectory = os.path.abspath(args.targetdirectory)
+    info = resolve_tag_or_image(args.image)
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(ensuredir(args.targetdirectory))
+        logging.info(f'Creating image from {args.image} in {args.targetdirectory}')
+        prepare_base(info, build_args=None)
+    finally:
+        os.chdir(old_cwd)
+
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
         if record.msg[0] == '\r':
@@ -550,6 +567,8 @@ def main(argv):
     parser = argparse.ArgumentParser(prog=app_name)
     parser.add_argument('-d', '--debug', action='store_true', default=False,
                         help='Enable debug logging')
+    parser.add_argument('-v', '--verbose', action='count', default=0,
+                        help='Increment verbosity level')
     parser.set_defaults(handler=lambda args: parser.print_help())
     sp = parser.add_subparsers()
 
@@ -601,6 +620,11 @@ def main(argv):
 
     p = sp.add_parser('dot', help='Produce graphviz dot description of objects')
     p.set_defaults(handler=command_dot)
+
+    p = sp.add_parser('create', help='Create a permanent image from a tag or image digest')
+    p.add_argument('image')
+    p.add_argument('targetdirectory')
+    p.set_defaults(handler=command_create)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,

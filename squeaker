@@ -405,6 +405,13 @@ def command_run(args):
         finally:
             os.chdir(old_cwd)
 
+def all_blobs(dirname):
+    blobs = []
+    for filename in os.listdir(dirname):
+        with open(os.path.join(dirname, filename), 'rt') as f:
+            blobs.append(json.load(f))
+    return blobs
+
 def command_gc(args):
     root_images = set()
     marked_images = set()
@@ -413,10 +420,7 @@ def command_gc(args):
     image_info = {}
     stage_info = {}
 
-    stagedir = ensurecachedir('stages')
-    for stagefile in os.listdir(stagedir):
-        with open(os.path.join(stagedir, stagefile), 'rt') as f:
-            info = json.load(f)
+    for info in all_blobs(ensurecachedir('stages')):
         image_info.setdefault(info['image_digest'], []).append(info)
         stage_info[info['stage_digest']] = info
 
@@ -431,10 +435,7 @@ def command_gc(args):
         if 'parent' in info:
             mark_stage(info['parent'], depth + 1)
 
-    tagdir = ensurecachedir('tags')
-    for tag in os.listdir(tagdir):
-        with open(os.path.join(tagdir, tag), 'rt') as f:
-            info = json.load(f)
+    for info in all_blobs(ensurecachedir('tags')):
         marked_images.add(info['image_digest'])
         mark_stage(info['stage_digest'], 0)
 
@@ -443,8 +444,10 @@ def command_gc(args):
             if info['stage_type'] == 'url':
                 mark_stage(info['stage_digest'], 0)
     elif args.delete_urls is True:
-        # We've already marked all the referenced ones.
-        pass
+        for info in stage_info.values():
+            if info['stage_type'] == 'url':
+                if info['stage_digest'] in marked_stages:
+                    marked_images.add(info['image_digest'])
     elif args.delete_urls == 'all':
         for info in stage_info.values():
             if info['stage_type'] == 'url':
@@ -453,7 +456,7 @@ def command_gc(args):
         raise Exception(f'Invalid delete_urls setting: {repr(args.delete_urls)}')
 
     all_images = set(os.listdir(ensurecachedir('images')))
-    all_stages = set(os.listdir(stagedir))
+    all_stages = set(os.listdir(ensurecachedir('stages')))
 
     doomed_images = all_images - marked_images
     doomed_stages = all_stages - marked_stages
@@ -468,15 +471,29 @@ def command_gc(args):
     for s in doomed_stages:
         logging.info(f'    stage {s}')
         if not args.dry_run:
-            os.unlink(os.path.join(stagedir, s))
+            os.unlink(os.path.join(ensurecachedir('stages'), s))
 
 def command_tags(args):
-    tagdir = ensurecachedir('tags')
-    for tag in os.listdir(tagdir):
-        print(tag)
+    for info in all_blobs(ensurecachedir('tags')):
+        print(info['tag'])
 
 def command_resolve_tag(args):
     print(load_tag(args.tag)['image_digest'])
+
+def command_dot(args):
+    print('digraph G {')
+    for info in all_blobs(ensurecachedir('tags')):
+        print(f'  stage_{info["stage_digest"][:8]} -> tag_{info["tag"]};')
+    for info in all_blobs(ensurecachedir('stages')):
+        print(f'  image_{info["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+        ty = info['stage_type']
+        if ty == 'url':
+            print(f'  "{info["url"]}" -> image_{info["image_digest"][:8]};')
+        elif ty == 'stage':
+            print(f'  stage_{info["parent"][:8]} -> stage_{info["stage_digest"][:8]};')
+        else:
+            pass
+    print('}')
 
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
@@ -549,6 +566,9 @@ def main(argv):
     p = sp.add_parser('resolve-tag', help='Resolve a tagged image to an on-disk path')
     p.add_argument('tag')
     p.set_defaults(handler=command_resolve_tag)
+
+    p = sp.add_parser('dot', help='Produce graphviz dot description of objects')
+    p.set_defaults(handler=command_dot)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,

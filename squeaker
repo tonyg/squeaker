@@ -3,6 +3,7 @@
 from pathlib import Path
 from urllib.request import Request, urlopen
 import argparse
+import glob
 import hashlib
 import json
 import math
@@ -82,6 +83,9 @@ def load_stage(stage_digest, no_cache=[]):
         logging.debug(f'  cache miss')
     return None
 
+def image_path(image_digest):
+    return os.path.join(ensurecachedir('images'), image_digest)
+
 def stage_lookup(no_cache, stage_type, stage_key_fn, if_absent, extra):
     logging.debug(f'stage_lookup of type {repr(stage_type)}')
     info = load_stage(digest_stage(stage_type, stage_key_fn()), no_cache)
@@ -91,14 +95,14 @@ def stage_lookup(no_cache, stage_type, stage_key_fn, if_absent, extra):
     with tempfile.NamedTemporaryFile(prefix='squeaker-stage-') as output:
         if_absent(output)
         output.flush()
-        ir = ImageRef.for_digest(digest_file(output.name))
-        shutil.copyfile(output.name, ir.path)
+        image_digest = digest_file(output.name)
+        shutil.copyfile(output.name, image_path(image_digest))
 
     final_stage_key = stage_key_fn()
     final_stage_digest = digest_stage(stage_type, final_stage_key)
 
     info = {
-        'image_digest': ir.digest,
+        'image_digest': image_digest,
         'stage_digest': final_stage_digest,
         'stage_type': stage_type,
         'stage_key': final_stage_key,
@@ -133,11 +137,13 @@ def download(no_cache, url):
 def tag_path(tag):
     return os.path.join(ensurecachedir('tags'), tag)
 
-def load_tag(tag):
+def load_tag(tag, missing_ok=False):
     path = tag_path(tag)
     if os.path.exists(path):
         with open(path, 'rt') as f:
             return json.load(f)
+    if missing_ok:
+        return None
     raise Exception(f'Could not load tag {repr(tag)}')
 
 def pretty_stage(stage):
@@ -167,9 +173,9 @@ def archive_with_progress(z, sourcename, entryname):
             copy_with_progress(str(os.path.getsize(sourcename)), from_fh=from_fh, to_fh=to_fh, extra=' archiving: ' + entryname)
 
 def ensure_image_present(info, build_args):
-    path = ImageRef.for_digest(info['image_digest']).path
+    path = image_path(info['image_digest'])
     if os.path.exists(path):
-        logging.debug(f'Image exists for stage {info["stage_digest"][:20]} at {path}')
+        logging.debug(f'Image exists for stage {info.get("stage_digest", "???")[:20]} at {path}')
         return info
 
     if build_args is None:
@@ -195,7 +201,7 @@ def ensure_image_present(info, build_args):
 
 def prepare_base(info, build_args):
     info = ensure_image_present(info, build_args)
-    path = ImageRef.for_digest(info['image_digest']).path
+    path = image_path(info['image_digest'])
     z = zipfile.ZipFile(path)
     names = z.namelist()
     imagename = next((n for n in names if n.endswith('.image')), None)
@@ -292,18 +298,6 @@ def apply_chunk(args, base_stage, chunk):
         'chunk': chunk,
     })
 
-class ImageRef:
-    def __init__(self, digest, path):
-        self.digest = digest
-        self.path = path
-
-    def __repr__(self):
-        return f'{self.digest[:20]}'
-
-    @staticmethod
-    def for_digest(digest):
-        return ImageRef(digest, os.path.join(ensurecachedir('images'), digest))
-
 class ChunkReader:
     def __init__(self, fh):
         self.fh = fh
@@ -385,13 +379,25 @@ def command_build(args):
         base_stage = ensure_image_present(base_stage, build_args=args)
         if args.t:
             write_tag(base_stage, args.t, {})
+        print(base_stage['image_digest'])
 
 def command_run(args):
-    info = load_tag(args.image)
+    info = load_tag(args.image, missing_ok=True)
+    if info is None:
+        matches = glob.glob(image_path(args.image + '*'))
+        print(matches)
+        if len(matches) == 1:
+            info = {'image_digest': os.path.basename(matches[0])}
+        elif len(matches) > 1:
+            raise Exception(f'Ambiguous image specifier: {repr(args.image)}')
+    if info is None:
+        raise Exception(f'Could not resolve tag or image {repr(args.image)}')
+
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory(prefix='squeaker-run-') as rundirname:
         try:
             os.chdir(rundirname)
+            logging.info(f'Image: {info["image_digest"]}')
             prepare_base(info, build_args=None)
             subprocess.run(
                 [args.vm, *(['-vm-display-null'] if args.headless else []), 'squeak.image', *args.args],
@@ -464,6 +470,14 @@ def command_gc(args):
         if not args.dry_run:
             os.unlink(os.path.join(stagedir, s))
 
+def command_tags(args):
+    tagdir = ensurecachedir('tags')
+    for tag in os.listdir(tagdir):
+        print(tag)
+
+def command_resolve_tag(args):
+    print(load_tag(args.tag)['image_digest'])
+
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
         if record.msg[0] == '\r':
@@ -528,6 +542,13 @@ def main(argv):
     p.add_argument('--keep-intermediate', metavar='N', dest='keep_intermediate_stages', type=int,
                    help='Keep most-recent N intermediate stage images for each tag')
     p.set_defaults(handler=command_gc)
+
+    p = sp.add_parser('tags', help='List available tagged images')
+    p.set_defaults(handler=command_tags)
+
+    p = sp.add_parser('resolve-tag', help='Resolve a tagged image to an on-disk path')
+    p.add_argument('tag')
+    p.set_defaults(handler=command_resolve_tag)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,

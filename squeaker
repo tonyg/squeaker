@@ -559,8 +559,8 @@ def main(argv):
                    help='Delete unreferenced downloaded image files')
     p.add_argument('--delete-all-urls', dest='delete_urls', action='store_const', const='all',
                    help='Delete all downloaded image files')
-    p.add_argument('--keep-all-intermediate', dest='keep_intermediate_stages', action='store_const', const=math.inf, default=1,
-                   help='Keep all intermediate stage images for each tag')
+    p.add_argument('--discard-all-intermediate', dest='keep_intermediate_stages', action='store_const', const=0, default=math.inf,
+                   help='Discard all intermediate stage images')
     p.add_argument('--keep-intermediate', metavar='N', dest='keep_intermediate_stages', type=int,
                    help='Keep most-recent N intermediate stage images for each tag')
     p.set_defaults(handler=command_gc)

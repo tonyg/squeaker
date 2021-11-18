@@ -171,7 +171,6 @@ def resolve_tag_or_image(image):
     info = load_tag(image, missing_ok=True)
     if info is None:
         matches = glob.glob(image_path(image + '*'))
-        print(matches)
         if len(matches) == 1:
             info = {'image_digest': os.path.basename(matches[0])}
         elif len(matches) > 1:

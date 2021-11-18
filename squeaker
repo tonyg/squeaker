@@ -208,6 +208,12 @@ def archive_with_progress(z, sourcename, entryname):
         with z.open(entryname, 'w') as to_fh:
             copy_with_progress(str(os.path.getsize(sourcename)), from_fh=from_fh, to_fh=to_fh, extra=' archiving: ' + entryname)
 
+def unlink_missing_ok(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
 def ensure_image_present(info, build_args):
     path = image_path(info['image_digest'])
     if os.path.exists(path):
@@ -219,10 +225,7 @@ def ensure_image_present(info, build_args):
 
     logging.info(f'Rebuilding image for stage {info["stage_digest"][:20]}')
 
-    try:
-        os.unlink(stage_path(info['stage_digest']))
-    except FileNotFoundError:
-        pass
+    unlink_missing_ok(stage_path(info['stage_digest']))
 
     desired_stage_type = info['stage_type']
     if desired_stage_type == 'url':
@@ -557,6 +560,10 @@ def command_create(args):
     finally:
         os.chdir(old_cwd)
 
+def command_untag(args):
+    for tag in args.tag:
+        unlink_missing_ok(tag_path(tag))
+
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
         if record.msg[0] == '\r':
@@ -640,6 +647,10 @@ def main(argv):
     p.add_argument('image')
     p.add_argument('targetdirectory')
     p.set_defaults(handler=command_create)
+
+    p = sp.add_parser('untag', help='Remove tags')
+    p.add_argument('tag', nargs='*')
+    p.set_defaults(handler=command_untag)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,

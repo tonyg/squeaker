@@ -433,7 +433,11 @@ def command_run(args):
             logging.info(f'Image: {info["image_digest"]}')
             prepare_base(info, build_args=None)
             subprocess.run(
-                [args.vm, *(['-vm-display-null'] if args.headless else []), 'squeak.image', *args.args],
+                [ *(['sudo', '--'] if args.root else []),
+                  args.vm,
+                  *(['-vm-display-null'] if args.headless else []),
+                  'squeak.image',
+                  *args.args],
                 check=True)
         finally:
             os.chdir(old_cwd)
@@ -602,7 +606,9 @@ def main(argv):
     p = sp.add_parser('run', help='Run image')
     p.add_argument('--vm', type=str, default='squeak',
                    help='Specify VM executable name')
-    p.add_argument('--headless', dest='headless', action='store_true', default=False,
+    p.add_argument('--root', action='store_true', default=False,
+                   help='Execute VM within `sudo`')
+    p.add_argument('--headless', action='store_true', default=False,
                    help='Run squeak with a dummy display, not showing the window')
     p.add_argument('image')
     p.add_argument('args', nargs=argparse.REMAINDER)

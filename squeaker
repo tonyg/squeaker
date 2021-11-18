@@ -516,8 +516,9 @@ def command_resolve_tag(args):
 def command_dot(args):
     print('digraph G {')
     for info in all_blobs(ensurecachedir('tags')):
-        print(f'  tag_{info["tag"]} [shape=octagon, style=filled, fillcolor="#ffccff"];')
-        print(f'  image_{info["image_digest"][:8]} -> tag_{info["tag"]};')
+        tn = f'"tag_{info["tag"]}"'
+        print(f'  {tn} [shape=octagon, style=filled, fillcolor="#ffccff"];')
+        print(f'  image_{info["image_digest"][:8]} -> {tn};')
     stages = dict((s['stage_digest'], s) for s in all_blobs(ensurecachedir('stages')))
     for info in stages.values():
         print(f'  stage_{info["stage_digest"][:8]} [shape=note, style=filled, fillcolor="#ffcccc"];')
@@ -528,10 +529,19 @@ def command_dot(args):
             print(f'  "{info["url"]}" [shape=box, style=filled, fillcolor="#ffffcc"];')
             print(f'  "{info["url"]}" -> stage_{info["stage_digest"][:8]};')
         elif ty == 'stage':
+            print(f'  note_{info["stage_digest"][:8]} [shape=note, style=filled, fillcolor="#ffffaa", label={dotescape(info["chunk"])}];')
+            print(f'  note_{info["stage_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
             print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
         else:
             pass
     print('}')
+
+def dotescape(s):
+    s = s.replace('\\', '\\\\')
+    s = s.replace('\n', '\\l')
+    s = s.replace('\r', '\\l')
+    s = s.replace('"', '\\"')
+    return f'"{s}\\l"'
 
 def command_create(args):
     args.targetdirectory = os.path.abspath(args.targetdirectory)

@@ -188,40 +188,11 @@ deleted, without deleting anything.
 You can also get a picture of the (live) contents of your cache by
 running the [Graphviz](https://graphviz.org/)
 [dot](https://graphviz.org/doc/info/lang.html) tool over the output of
-the `squeaker dot` command:
+the `squeaker dot` command.
 
-```dot
-digraph G {
-  tag_myimage [shape=octagon, style=filled, fillcolor="#ffccff"];
-  image_4c876796 -> tag_myimage;
-  stage_5318f3bb [shape=note, style=filled, fillcolor="#ffcccc"];
-  image_2d3e3652 [shape=ellipse, style=filled, fillcolor="#ccffcc"];
-  stage_5318f3bb -> image_2d3e3652;
-  "http://files.squeak.org/6.0alpha/Squeak6.0alpha-20582-64bit/Squeak6.0alpha-20582-64bit.zip" [shape=box, style=filled, fillcolor="#ffffcc"];
-  "http://files.squeak.org/6.0alpha/Squeak6.0alpha-20582-64bit/Squeak6.0alpha-20582-64bit.zip" -> stage_5318f3bb;
-  stage_042e4ded [shape=note, style=filled, fillcolor="#ffcccc"];
-  image_a65c4397 [shape=ellipse, style=filled, fillcolor="#ccffcc"];
-  stage_042e4ded -> image_a65c4397;
-  image_2d3e3652 -> stage_042e4ded;
-  stage_989d75de [shape=note, style=filled, fillcolor="#ffcccc"];
-  image_e80909c4 [shape=ellipse, style=filled, fillcolor="#ccffcc"];
-  stage_989d75de -> image_e80909c4;
-  image_a65c4397 -> stage_989d75de;
-  stage_3583b314 [shape=note, style=filled, fillcolor="#ffcccc"];
-  image_9e4bcce2 [shape=ellipse, style=filled, fillcolor="#ccffcc"];
-  stage_3583b314 -> image_9e4bcce2;
-  image_e80909c4 -> stage_3583b314;
-  stage_866f5bb6 [shape=note, style=filled, fillcolor="#ffcccc"];
-  image_4c876796 [shape=ellipse, style=filled, fillcolor="#ccffcc"];
-  stage_866f5bb6 -> image_4c876796;
-  image_9e4bcce2 -> stage_866f5bb6;
-}
-```
+Here's the kind of thing it looks like:
 
-Not very exciting to look at unless you have more than one branch
-leading from a given image, I suppose:
-
-![Graph of the example drawn by Graphviz dot](./example-graph.png)
+![Example graph drawn by Graphviz dot](./example-graph.png)
 
 ## Chunk format
 

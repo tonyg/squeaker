@@ -483,14 +483,19 @@ def command_resolve_tag(args):
 def command_dot(args):
     print('digraph G {')
     for info in all_blobs(ensurecachedir('tags')):
-        print(f'  stage_{info["stage_digest"][:8]} -> tag_{info["tag"]};')
-    for info in all_blobs(ensurecachedir('stages')):
-        print(f'  image_{info["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+        print(f'  tag_{info["tag"]} [shape=octagon, style=filled, fillcolor="#ffccff"];')
+        print(f'  image_{info["image_digest"][:8]} -> tag_{info["tag"]};')
+    stages = dict((s['stage_digest'], s) for s in all_blobs(ensurecachedir('stages')))
+    for info in stages.values():
+        print(f'  stage_{info["stage_digest"][:8]} [shape=note, style=filled, fillcolor="#ffcccc"];')
+        print(f'  image_{info["image_digest"][:8]} [shape=ellipse, style=filled, fillcolor="#ccffcc"];')
+        print(f'  stage_{info["stage_digest"][:8]} -> image_{info["image_digest"][:8]};')
         ty = info['stage_type']
         if ty == 'url':
-            print(f'  "{info["url"]}" -> image_{info["image_digest"][:8]};')
+            print(f'  "{info["url"]}" [shape=box, style=filled, fillcolor="#ffffcc"];')
+            print(f'  "{info["url"]}" -> stage_{info["stage_digest"][:8]};')
         elif ty == 'stage':
-            print(f'  stage_{info["parent"][:8]} -> stage_{info["stage_digest"][:8]};')
+            print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
         else:
             pass
     print('}')

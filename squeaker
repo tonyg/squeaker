@@ -46,6 +46,9 @@ def digest_digests(digests):
         d.update(bytearray.fromhex(item))
     return d.hexdigest()
 
+def digest_stage(stage_type, stage_key):
+    return digest(f'{stage_type}\n{stage_key}')
+
 def copy_with_progress(expected_str, from_fh, to_fh, extra=''):
     expected = int(expected_str) if expected_str is not None else None
     block_size = math.ceil(expected / 100) if expected is not None else 131072
@@ -61,78 +64,95 @@ def copy_with_progress(expected_str, from_fh, to_fh, extra=''):
         to_fh.write(buf)
     logging.info('\r' + status() + '\n')
 
-def stage_cache_lookup(no_cache, stage_type, stage_key, if_absent, extra):
-    full_stage = f'{stage_type}\n{stage_key}'
-    full_stage_digest = digest(full_stage)
-    infopath = os.path.join(ensurecachedir('stages'), full_stage_digest)
-    logging.debug(f'stage cache check for {infopath}, type {stage_type}')
+def stage_path(stage_digest):
+    return os.path.join(ensurecachedir('stages'), stage_digest)
 
+def load_stage(stage_digest, no_cache=[]):
+    infopath = stage_path(stage_digest)
+    logging.debug(f'stage cache check {infopath}')
     if os.path.exists(infopath):
-        if stage_type in no_cache:
-            logging.info(f'Ignoring (and replacing) stage cache entry for {full_stage_digest[:20]}')
+        with open(infopath, 'rt') as f:
+            info = json.load(f)
+        if info['stage_type'] in no_cache:
+            logging.info(f'Ignoring (and replacing) cache entry for stage {stage_digest[:20]}')
         else:
             logging.debug(f'  cache hit')
-            with open(infopath, 'rt') as f:
-                ir = ImageRef.for_digest(json.load(f)['image_digest'])
-                if os.path.exists(ir.path):
-                    return ir
-                else:
-                    logging.warning(f'Cached image {ir.digest} is missing!')
+            return info
     else:
         logging.debug(f'  cache miss')
+    return None
+
+def stage_lookup(no_cache, stage_type, stage_key_fn, if_absent, extra):
+    logging.debug(f'stage_lookup of type {repr(stage_type)}')
+    info = load_stage(digest_stage(stage_type, stage_key_fn()), no_cache)
+    if info is not None:
+        return info
 
     with tempfile.NamedTemporaryFile(prefix='squeaker-stage-') as output:
         if_absent(output)
         output.flush()
         ir = ImageRef.for_digest(digest_file(output.name))
         shutil.copyfile(output.name, ir.path)
-    with open(infopath, 'wt') as f:
-        info = {
-            'image_digest': ir.digest,
-            'stage_type': stage_type,
-            'stage_key': stage_key,
-        }
-        for (k, v) in extra.items():
-            info[k] = v
+
+    final_stage_key = stage_key_fn()
+    final_stage_digest = digest_stage(stage_type, final_stage_key)
+
+    info = {
+        'image_digest': ir.digest,
+        'stage_digest': final_stage_digest,
+        'stage_type': stage_type,
+        'stage_key': final_stage_key,
+    }
+    for (k, v) in extra.items():
+        info[k] = v
+
+    with open(stage_path(final_stage_digest), 'wt') as f:
         json.dump(info, f, indent=2)
-    return ir
+
+    return info
 
 def download(no_cache, url):
-    req = Request(url)
-    if req.type == 'file':
-        path = req.selector
-        logging.debug('local file ' + repr(path))
-        h = digest_file(path)
-        return ImageRef(h, path)
-    else:
-        def if_absent(output):
+    def if_absent(output):
+        req = Request(url)
+        if req.type == 'file':
+            path = req.selector
+            with open(path, 'rb') as from_fh:
+                logging.info(f'Copying local file {repr(path)} into cache')
+                copy_with_progress(expected_str=str(os.path.getsize(path)), from_fh=from_fh, to_fh=output, extra=' ' + path)
+        else:
             resp = urlopen(req)
             if resp.status >= 200 and resp.status <= 299:
                 logging.info(f'Downloading {url}')
                 copy_with_progress(expected_str=resp.headers['content-length'], from_fh=resp, to_fh=output, extra=' ' + url)
             else:
                 raise Exception(f'Could not retrieve {url}: HTTP response code {resp.status}:\n{resp.headers}')
-        return stage_cache_lookup(no_cache, 'url', url, if_absent, {})
+    return stage_lookup(no_cache, 'url', lambda: url, if_absent, {
+        'url': url
+    })
 
 def tag_path(tag):
     return os.path.join(ensurecachedir('tags'), tag)
 
-def resolve_tag(tag):
+def load_tag(tag):
     path = tag_path(tag)
     if os.path.exists(path):
         with open(path, 'rt') as f:
-            return ImageRef.for_digest(json.load(f)['image_digest'])
-    raise Exception(f'Could not resolve tag {repr(tag)}')
+            return json.load(f)
+    raise Exception(f'Could not load tag {repr(tag)}')
 
-def write_tag(ir, tag, extra):
-    logging.info(f'Tagging {ir} as {repr(tag)}')
+def pretty_stage(stage):
+    return stage['image_digest'][:20]
+
+def write_tag(stage, tag, extra):
+    logging.info(f'Tagging {pretty_stage(stage)} as {repr(tag)}')
+    info = {
+        'stage_digest': stage['stage_digest'],
+        'image_digest': stage['image_digest'],
+        'tag': tag,
+    }
+    for (k, v) in extra.items():
+        info[k] = v
     with open(tag_path(tag), 'wt') as f:
-        info = {
-            'image_digest': ir.digest,
-            'tag': tag,
-        }
-        for (k, v) in extra.items():
-            info[k] = v
         json.dump(info, f, indent=2)
 
 def extract_with_progress(z, entryname, targetname):
@@ -146,7 +166,36 @@ def archive_with_progress(z, sourcename, entryname):
         with z.open(entryname, 'w') as to_fh:
             copy_with_progress(str(os.path.getsize(sourcename)), from_fh=from_fh, to_fh=to_fh, extra=' archiving: ' + entryname)
 
-def prepare_base(path):
+def ensure_image_present(info, build_args):
+    path = ImageRef.for_digest(info['image_digest']).path
+    if os.path.exists(path):
+        logging.debug(f'Image exists for stage {info["stage_digest"][:20]} at {path}')
+        return info
+
+    if build_args is None:
+        raise Exception(f'Cannot find image {repr(path)}')
+
+    logging.info(f'Rebuilding image for stage {info["stage_digest"][:20]}')
+
+    try:
+        os.unlink(stage_path(info['stage_digest']))
+    except FileNotFoundError:
+        pass
+
+    desired_stage_type = info['stage_type']
+    if desired_stage_type == 'url':
+        return download(build_args.no_cache, info['url'])
+    elif desired_stage_type == 'stage':
+        parent_info = load_stage(info['parent'])
+        if parent_info is None:
+            raise Exception(f'Cannot find stage {info["parent"][:20]}')
+        return apply_chunk(build_args, parent_info, info['chunk'])
+    else:
+        raise Exception(f'Unknown stage_type {desired_stage_type}')
+
+def prepare_base(info, build_args):
+    info = ensure_image_present(info, build_args)
+    path = ImageRef.for_digest(info['image_digest']).path
     z = zipfile.ZipFile(path)
     names = z.namelist()
     imagename = next((n for n in names if n.endswith('.image')), None)
@@ -157,6 +206,7 @@ def prepare_base(path):
         raise Exception(f'Base image zip file contains image {repr(imagename)} but not {repr(changesname)}')
     extract_with_progress(z, imagename, 'squeak.image')
     extract_with_progress(z, changesname, 'squeak.changes')
+    return info
 
 def report_time(label, action):
     start_time = time.monotonic()
@@ -212,17 +262,32 @@ def make_archive(output):
         archive_with_progress(z, 'squeak.image', 'squeak.image')
         archive_with_progress(z, 'squeak.changes', 'squeak.changes')
 
-def apply_chunk(args, base_image_ref, chunk):
-    stage_digest = digest_digests([base_image_ref.digest, digest(args.vm), digest(chunk)])
+def apply_chunk(args, base_stage, chunk):
+    #
+    # NOTE: base_stage[0] is *UPDATED* when if_absent is called!
+    #       This makes digest_inputs_fn() yield a different answer,
+    #       which in turn allows us to repair a partially-cached stage-path.
+    #
+    base_stage = [base_stage]
+
+    vm_digest = digest(args.vm)
+    chunk_digest = digest(chunk)
+    digest_inputs_fn = lambda: [base_stage[0]['stage_digest'],
+                                base_stage[0]['image_digest'],
+                                vm_digest,
+                                chunk_digest]
     def if_absent(output):
         with tempfile.TemporaryDirectory(prefix='squeaker-build-') as builddirname:
             os.chdir(builddirname)
-            prepare_base(base_image_ref.path)
+            base_stage[0] = prepare_base(base_stage[0], build_args=args)
+            logging.info(f' --- {pretty_stage(base_stage[0])}')
+            logging.info(('Running:\n' + chunk.replace('\r', '\n')).replace('\n', '\n    '))
             report_time('execution', lambda: incorporate_chunk(args, chunk))
             report_time('archiving', lambda: make_archive(output))
             os.chdir(args.directory)
-    return stage_cache_lookup(args.no_cache, 'stage', stage_digest, if_absent, {
-        'base_image_digest': base_image_ref.digest,
+    return stage_lookup(args.no_cache, 'stage', lambda: digest_digests(digest_inputs_fn()), if_absent, {
+        'parent': base_stage[0]['stage_digest'],
+        'digest_inputs': digest_inputs_fn(),
         'vm': args.vm,
         'chunk': chunk,
     })
@@ -289,7 +354,7 @@ def command_build(args):
     args.directory = os.path.abspath(args.directory)
     os.chdir(args.directory)
 
-    base_image_ref = None
+    base_stage = None
 
     with open(args.f, 'rb') as squeakerfile:
         for chunk in ChunkReader(squeakerfile):
@@ -300,34 +365,34 @@ def command_build(args):
 
                 lit = lex_string_literal(loc)
                 if lit is not None:
-                    base_image_ref = download(args.no_cache, lit)
+                    base_stage = download(args.no_cache, lit)
                     continue
 
                 srctag = lex_symbol(loc)
                 if srctag is not None:
-                    base_image_ref = resolve_tag(srctag)
+                    base_stage = load_tag(srctag)
                     continue
 
                 raise Exception('Cannot resolve "from:" specifier: ', repr(loc))
             elif chunk == '':
                 pass
             else:
-                if base_image_ref is None:
+                if base_stage is None:
                     raise Exception('No "from:" specifier given')
-                logging.info(f' --- {base_image_ref}')
-                logging.info(('\n' + chunk.replace('\r', '\n')).replace('\n', '\n    '))
-                base_image_ref = apply_chunk(args, base_image_ref, chunk)
+                base_stage = apply_chunk(args, base_stage, chunk)
 
-    if args.t and base_image_ref is not None:
-        write_tag(base_image_ref, args.t, {})
+    if base_stage is not None:
+        base_stage = ensure_image_present(base_stage, build_args=args)
+        if args.t:
+            write_tag(base_stage, args.t, {})
 
 def command_run(args):
-    ir = resolve_tag(args.image)
+    info = load_tag(args.image)
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory(prefix='squeaker-run-') as rundirname:
         try:
             os.chdir(rundirname)
-            prepare_base(ir.path)
+            prepare_base(info, build_args=None)
             subprocess.run(
                 [args.vm, *(['-vm-display-null'] if args.headless else []), 'squeak.image', *args.args],
                 check=True)
@@ -340,20 +405,64 @@ def command_gc(args):
     marked_stages = set()
 
     image_info = {}
+    stage_info = {}
 
     stagedir = ensurecachedir('stages')
     for stagefile in os.listdir(stagedir):
         with open(os.path.join(stagedir, stagefile), 'rt') as f:
             info = json.load(f)
         image_info.setdefault(info['image_digest'], []).append(info)
+        stage_info[info['stage_digest']] = info
+
+    def mark_stage(stage_digest, depth):
+        marked_stages.add(stage_digest)
+        info = stage_info.get(stage_digest, None)
+        if info is None:
+            # TODO: fsck-style warnings here
+            return
+        if depth <= args.keep_intermediate_stages:
+            marked_images.add(info['image_digest'])
+        if 'parent' in info:
+            mark_stage(info['parent'], depth + 1)
 
     tagdir = ensurecachedir('tags')
     for tag in os.listdir(tagdir):
         with open(os.path.join(tagdir, tag), 'rt') as f:
             info = json.load(f)
+        marked_images.add(info['image_digest'])
+        mark_stage(info['stage_digest'], 0)
 
-    print(args)
-    print(json.dumps(image_info, indent=2))
+    if args.delete_urls is False:
+        for info in stage_info.values():
+            if info['stage_type'] == 'url':
+                mark_stage(info['stage_digest'], 0)
+    elif args.delete_urls is True:
+        # We've already marked all the referenced ones.
+        pass
+    elif args.delete_urls == 'all':
+        for info in stage_info.values():
+            if info['stage_type'] == 'url':
+                marked_images.discard(info['image_digest'])
+    else:
+        raise Exception(f'Invalid delete_urls setting: {repr(args.delete_urls)}')
+
+    all_images = set(os.listdir(ensurecachedir('images')))
+    all_stages = set(os.listdir(stagedir))
+
+    doomed_images = all_images - marked_images
+    doomed_stages = all_stages - marked_stages
+
+    logging.info(('Would remove' if args.dry_run else 'Removing') + \
+                 f' {len(doomed_images)} image(s) and {len(doomed_stages)} stage(s)')
+
+    for i in doomed_images:
+        logging.info(f'    image {i}')
+        if not args.dry_run:
+            os.unlink(os.path.join(ensurecachedir('images'), i))
+    for s in doomed_stages:
+        logging.info(f'    stage {s}')
+        if not args.dry_run:
+            os.unlink(os.path.join(stagedir, s))
 
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
@@ -408,12 +517,16 @@ def main(argv):
     p.set_defaults(handler=command_run)
 
     p = sp.add_parser('gc', help='Garbage-collect images, stages etc.')
-    p.add_argument('--delete-urls', dest='delete_urls', action='store_true', default=False,
-                   help='Delete downloaded image files')
-    p.add_argument('--no-delete-stages', dest='delete_stages', action='store_false', default=True,
-                   help='Do not delete any intermediate stages')
-    p.add_argument('--delete-all-stages', dest='delete_stages', action='store_const', const='all',
-                   help='Delete all intermediate stages')
+    p.add_argument('-n', '--dry-run', dest='dry_run', action='store_true', default=False,
+                   help='Show what would be garbage-collected without deleting anything')
+    p.add_argument('--delete-unreferenced-urls', dest='delete_urls', action='store_true', default=False,
+                   help='Delete unreferenced downloaded image files')
+    p.add_argument('--delete-all-urls', dest='delete_urls', action='store_const', const='all',
+                   help='Delete all downloaded image files')
+    p.add_argument('--keep-all-intermediate', dest='keep_intermediate_stages', action='store_const', const=math.inf, default=1,
+                   help='Keep all intermediate stage images for each tag')
+    p.add_argument('--keep-intermediate', metavar='N', dest='keep_intermediate_stages', type=int,
+                   help='Keep most-recent N intermediate stage images for each tag')
     p.set_defaults(handler=command_gc)
 
     args = parser.parse_args(argv)

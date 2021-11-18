@@ -303,7 +303,9 @@ def apply_chunk(args, base_stage, chunk):
                                 base_stage[0]['image_digest'],
                                 vm_digest,
                                 chunk_digest]
+    was_cached = [True]
     def if_absent(output):
+        was_cached[0] = False
         with tempfile.TemporaryDirectory(prefix='squeaker-build-') as builddirname:
             os.chdir(builddirname)
             base_stage[0] = prepare_base(base_stage[0], build_args=args)
@@ -312,12 +314,16 @@ def apply_chunk(args, base_stage, chunk):
             report_time('execution', lambda: incorporate_chunk(args, chunk))
             report_time('archiving', lambda: make_archive(output))
             os.chdir(args.directory)
-    return stage_lookup(args.no_cache, 'stage', lambda: digest_digests(digest_inputs_fn()), if_absent, {
+    info = stage_lookup(args.no_cache, 'stage', lambda: digest_digests(digest_inputs_fn()), if_absent, {
         'parent': base_stage[0]['stage_digest'],
         'digest_inputs': digest_inputs_fn(),
         'vm': args.vm,
         'chunk': chunk,
     })
+    if was_cached:
+        logging.info(f' >>> image {pretty_stage(info)}, stage {info["stage_digest"][:20]}')
+        logging.info(('     is the cached result of command(s):\n' + chunk.replace('\r', '\n')).replace('\n', '\n    '))
+    return info
 
 class ChunkReader:
     def __init__(self, fh):

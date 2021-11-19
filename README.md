@@ -5,8 +5,8 @@ kids.](https://www.youtube.com/watch?v=8UxAlkaTWLc)
 
 It's a small program that helps in automated derivation of
 *configured* Smalltalk images from some fixed *base* image and a
-collection of Smalltalk *commands*. It's about 500 lines of Python, so
-far.
+collection of Smalltalk *commands*. It's a few hundred lines of
+Python, so far.
 
  - `Squeakerfile.st` is like `Dockerfile`, except it contains
    locations to fetch images from plus Smalltalk expressions to derive

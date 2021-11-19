@@ -107,17 +107,18 @@ def load_stage(stage_digest, no_cache=[]):
 def image_path(image_digest):
     return os.path.join(ensurecachedir('images'), image_digest)
 
-def stage_lookup(no_cache, stage_type, stage_key_fn, if_absent, extra):
+def stage_lookup(no_cache, stage_type, stage_key_fn, if_absent, extra_fn):
     logging.debug(f'stage_lookup of type {repr(stage_type)}')
     info = load_stage(digest_stage(stage_type, stage_key_fn()), no_cache)
     if info is not None:
         return info
 
     with tempfile.NamedTemporaryFile(prefix='squeaker-stage-') as output:
-        if_absent(output)
-        output.flush()
-        image_digest = digest_file(output.name)
-        shutil.copyfile(output.name, image_path(image_digest))
+        image_digest = if_absent(output)
+        if image_digest is None:
+            output.flush()
+            image_digest = digest_file(output.name)
+            shutil.copyfile(output.name, image_path(image_digest))
 
     final_stage_key = stage_key_fn()
     final_stage_digest = digest_stage(stage_type, final_stage_key)
@@ -128,7 +129,7 @@ def stage_lookup(no_cache, stage_type, stage_key_fn, if_absent, extra):
         'stage_type': stage_type,
         'stage_key': final_stage_key,
     }
-    for (k, v) in extra.items():
+    for (k, v) in extra_fn().items():
         info[k] = v
 
     with open(stage_path(final_stage_digest), 'wt') as f:
@@ -151,7 +152,7 @@ def download(no_cache, url):
                 copy_with_progress(expected_str=resp.headers['content-length'], from_fh=resp, to_fh=output, extra=' ' + url)
             else:
                 raise Exception(f'Could not retrieve {url}: HTTP response code {resp.status}:\n{resp.headers}')
-    return stage_lookup(no_cache, 'url', lambda: url, if_absent, {
+    return stage_lookup(no_cache, 'url', lambda: url, if_absent, lambda: {
         'url': url
     })
 
@@ -167,14 +168,22 @@ def load_tag(tag, missing_ok=False):
         return None
     raise Exception(f'Could not load tag {repr(tag)}')
 
+def unambiguous_prefix(p):
+    if os.path.exists(p):
+        return p
+    matches = glob.glob(p + '*')
+    if len(matches) > 1:
+        raise Exception(f'Ambiguous filename prefix ({len(matches)} candidates found): {p}')
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
 def resolve_tag_or_image(image):
     info = load_tag(image, missing_ok=True)
     if info is None:
-        matches = glob.glob(image_path(image + '*'))
-        if len(matches) == 1:
-            info = {'image_digest': os.path.basename(matches[0])}
-        elif len(matches) > 1:
-            raise Exception(f'Ambiguous image specifier: {repr(image)}')
+        path = unambiguous_prefix(image_path(image))
+        if path is not None:
+            info = {'image_digest': os.path.basename(path)}
     if info is None:
         raise Exception(f'Could not resolve tag or image {repr(image)}')
     return info
@@ -235,6 +244,11 @@ def ensure_image_present(info, build_args):
         if parent_info is None:
             raise Exception(f'Cannot find stage {info["parent"][:20]}')
         return apply_chunk(build_args, parent_info, info['chunk'])
+    elif desired_stage_type == 'resource':
+        parent_info = load_stage(info['parent'])
+        if parent_info is None:
+            raise Exception(f'Cannot find stage {info["parent"][:20]}')
+        return depend_on_resource(build_args, parent_info, info['resource_path'])
     else:
         raise Exception(f'Unknown stage_type {desired_stage_type}')
 
@@ -332,7 +346,7 @@ def apply_chunk(args, base_stage, chunk):
             report_time('execution', lambda: incorporate_chunk(args, chunk))
             report_time('archiving', lambda: make_archive(output))
             os.chdir(args.directory)
-    info = stage_lookup(args.no_cache, 'stage', lambda: digest_digests(digest_inputs_fn()), if_absent, {
+    info = stage_lookup(args.no_cache, 'stage', lambda: digest_digests(digest_inputs_fn()), if_absent, lambda: {
         'parent': base_stage[0]['stage_digest'],
         'digest_inputs': digest_inputs_fn(),
         'vm': args.vm,
@@ -341,6 +355,45 @@ def apply_chunk(args, base_stage, chunk):
     if was_cached and args.verbose > 0:
         logging.info(f' >>> image {pretty_stage(info)}, stage {info["stage_digest"][:20]}')
         logging.info(('     is the cached result of command(s):\n' + chunk.replace('\r', '\n')).replace('\n', '\n    '))
+    return info
+
+def depend_on_resource(args, base_stage, resource_path):
+    #
+    # NOTE: base_stage[0] is *UPDATED* when if_absent is called!
+    #       This makes digest_inputs_fn() yield a different answer,
+    #       which in turn allows us to repair a partially-cached stage-path.
+    #
+    base_stage = [base_stage]
+
+    if os.path.exists(resource_path):
+        resource_digest = digest_file(resource_path)
+    else:
+        resource_digest = None
+
+    digest_inputs_fn = lambda: [base_stage[0]['stage_digest'],
+                                base_stage[0]['image_digest'],
+                                *([resource_digest] if resource_digest else [])]
+
+    was_cached = [True]
+    def if_absent(output):
+        was_cached[0] = False
+        base_stage[0] = ensure_image_present(base_stage[0], args)
+        logging.info(f' --- {pretty_stage(base_stage[0])}')
+        logging.info(f'Resource digest {resource_digest[:20] if resource_digest else "(absent)"} for {resource_path}')
+        return base_stage[0]['image_digest']
+    def mk_extra():
+        extra = {
+            'parent': base_stage[0]['stage_digest'],
+            'digest_inputs': digest_inputs_fn(),
+            'resource_path': resource_path,
+        }
+        if resource_digest:
+            extra['resource_digest'] = resource_digest
+        return extra
+    info = stage_lookup(args.no_cache, 'resource', lambda: digest_digests(digest_inputs_fn()), if_absent, mk_extra)
+    if was_cached and args.verbose > 0:
+        logging.info(f' >>> image {pretty_stage(info)}, stage {info["stage_digest"][:20]}')
+        logging.info(f'     is the cached result of depending on resource {resource_path}')
     return info
 
 class ChunkReader:
@@ -413,6 +466,22 @@ def command_build(args):
                     continue
 
                 raise Exception('Cannot resolve "from:" specifier: ', repr(loc))
+            elif chunk.startswith('resource:'):
+                resource_path = lex_string_literal(chunk[9:].strip())
+                if lit is not None:
+                    base_stage = depend_on_resource(args, base_stage, resource_path)
+                    continue
+                raise Exception('Invalid "resource:" chunk: ', repr(chunk))
+            elif chunk.startswith('fileIn:'):
+                literal_path = chunk[7:].strip()
+                resource_path = lex_string_literal(literal_path)
+                if resource_path is not None:
+                    base_stage = depend_on_resource(args, base_stage, resource_path)
+                    if not os.path.exists(resource_path):
+                        raise Exception('Missing file in fileIn: ' + resource_path)
+                    base_stage = apply_chunk(args, base_stage, f'Installer installFile: {literal_path}')
+                    continue
+                raise Exception('Invalid "fileIn:" chunk: ', repr(chunk))
             elif chunk == '':
                 pass
             else:
@@ -532,10 +601,17 @@ def command_dot(args):
         print(f'  stage_{info["stage_digest"][:8]} -> image_{info["image_digest"][:8]};')
         ty = info['stage_type']
         if ty == 'url':
-            print(f'  "{info["url"]}" [shape=box, style=filled, fillcolor="#ffffcc"];')
-            print(f'  "{info["url"]}" -> stage_{info["stage_digest"][:8]};')
+            un = f'url_{info["image_digest"][:8]}'
+            url_label = dotescape(info["url"] + '\n' + info["image_digest"])
+            print(f'  {un} [shape=box, style=filled, fillcolor="#ccccff", label={url_label}];')
+            print(f'  {un} -> stage_{info["stage_digest"][:8]};')
         elif ty == 'stage':
             print(f'  note_{info["stage_digest"][:8]} [shape=note, style=filled, fillcolor="#ffffaa", label={dotescape(info["chunk"])}];')
+            print(f'  note_{info["stage_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+            print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+        elif ty == 'resource':
+            r_label = dotescape(info["resource_path"] + '\n' + info.get("resource_digest", "(absent)"))
+            print(f'  note_{info["stage_digest"][:8]} [shape=box, style=filled, fillcolor="#ccccff", label={r_label}];')
             print(f'  note_{info["stage_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
             print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
         else:
@@ -563,6 +639,13 @@ def command_create(args):
 def command_untag(args):
     for tag in args.tag:
         unlink_missing_ok(tag_path(tag))
+
+def command_unstage(args):
+    for digestprefix in args.digest:
+        path = unambiguous_prefix(stage_path(digestprefix))
+        if path is not None:
+            print(os.path.basename(path))
+            unlink_missing_ok(path)
 
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
@@ -651,6 +734,10 @@ def main(argv):
     p = sp.add_parser('untag', help='Remove tags')
     p.add_argument('tag', nargs='*')
     p.set_defaults(handler=command_untag)
+
+    p = sp.add_parser('unstage', help='Remove cached stages')
+    p.add_argument('digest', nargs='*')
+    p.set_defaults(handler=command_unstage)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,

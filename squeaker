@@ -468,7 +468,7 @@ def command_build(args):
                 raise Exception('Cannot resolve "from:" specifier: ', repr(loc))
             elif chunk.startswith('resource:'):
                 resource_path = lex_string_literal(chunk[9:].strip())
-                if lit is not None:
+                if resource_path is not None:
                     base_stage = depend_on_resource(args, base_stage, resource_path)
                     continue
                 raise Exception('Invalid "resource:" chunk: ', repr(chunk))

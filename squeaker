@@ -602,18 +602,20 @@ def command_dot(args):
         ty = info['stage_type']
         if ty == 'url':
             un = f'url_{info["image_digest"][:8]}'
-            url_label = dotescape(info["url"] + '\n' + info["image_digest"])
+            url_label = dotescape(info["url"] + '\n' + info["image_digest"][:20])
             print(f'  {un} [shape=box, style=filled, fillcolor="#ccccff", label={url_label}];')
             print(f'  {un} -> stage_{info["stage_digest"][:8]};')
         elif ty == 'stage':
             print(f'  note_{info["stage_digest"][:8]} [shape=note, style=filled, fillcolor="#ffffaa", label={dotescape(info["chunk"])}];')
             print(f'  note_{info["stage_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
             print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+            print(f'  stage_{info["parent"][:8]} -> stage_{info["stage_digest"][:8]};')
         elif ty == 'resource':
-            r_label = dotescape(info["resource_path"] + '\n' + info.get("resource_digest", "(absent)"))
+            r_label = dotescape(info["resource_path"] + '\n' + info.get("resource_digest", "(absent)")[:20])
             print(f'  note_{info["stage_digest"][:8]} [shape=box, style=filled, fillcolor="#ccccff", label={r_label}];')
             print(f'  note_{info["stage_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
             print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+            print(f'  stage_{info["parent"][:8]} -> stage_{info["stage_digest"][:8]};')
         else:
             pass
     print('}')

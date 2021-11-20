@@ -614,7 +614,12 @@ def command_dot(args):
             r_label = dotescape(info["resource_path"] + '\n' + info.get("resource_digest", "(absent)")[:20])
             print(f'  note_{info["stage_digest"][:8]} [shape=box, style=filled, fillcolor="#ccccff", label={r_label}];')
             print(f'  note_{info["stage_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
-            print(f'  image_{stages[info["parent"]]["image_digest"][:8]} -> stage_{info["stage_digest"][:8]};')
+            par = stages.get(info["parent"])
+            if par is None:
+                par_img = f'image_UNKNOWN_from_stage_{info["parent"][:8]}'
+            else:
+                par_img = par["image_digest"][:8]
+            print(f'  image_{par_img} -> stage_{info["stage_digest"][:8]};')
             print(f'  stage_{info["parent"][:8]} -> stage_{info["stage_digest"][:8]};')
         else:
             pass

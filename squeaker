@@ -178,7 +178,7 @@ def unambiguous_prefix(p):
         return matches[0]
     return None
 
-def resolve_tag_or_image(image):
+def resolve_snapshot_name(image):
     info = load_tag(image, missing_ok=True)
     if info is None:
         path = unambiguous_prefix(image_path(image))
@@ -496,7 +496,7 @@ def command_build(args):
         print(base_stage['image_digest'])
 
 def command_run(args):
-    info = resolve_tag_or_image(args.image)
+    info = resolve_snapshot_name(args.image)
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory(prefix='squeaker-run-') as rundirname:
         try:
@@ -634,7 +634,7 @@ def dotescape(s):
 
 def command_create(args):
     args.targetdirectory = os.path.abspath(args.targetdirectory)
-    info = resolve_tag_or_image(args.image)
+    info = resolve_snapshot_name(args.image)
     old_cwd = os.getcwd()
     try:
         os.chdir(ensuredir(args.targetdirectory))

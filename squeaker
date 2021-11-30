@@ -24,6 +24,7 @@
 from pathlib import Path
 from urllib.request import Request, urlopen
 import argparse
+import datetime
 import glob
 import hashlib
 import json
@@ -495,6 +496,13 @@ def command_build(args):
             write_tag(base_stage, args.t, {})
         print(base_stage['image_digest'])
 
+def prune_recent_changes():
+    changesdir = ensurecachedir('recentchanges')
+    changesfiles = os.listdir(changesdir)
+    changesfiles = sorted(changesfiles)
+    for filename in changesfiles[:-5]:
+        unlink_missing_ok(os.path.join(changesdir, filename))
+
 def command_run(args):
     info = resolve_snapshot_name(args.image)
     old_cwd = os.getcwd()
@@ -511,7 +519,12 @@ def command_run(args):
                   *args.args],
                 check=True)
         finally:
-            os.chdir(old_cwd)
+            try:
+                n = 'squeak.' + datetime.datetime.utcnow().isoformat(timespec='seconds') + 'Z.changes'
+                shutil.move('squeak.changes', os.path.join(ensurecachedir('recentchanges'), n))
+                prune_recent_changes()
+            finally:
+                os.chdir(old_cwd)
 
 def all_blobs(dirname):
     blobs = []

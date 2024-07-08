@@ -314,7 +314,7 @@ def incorporate_chunk(args, chunk):
         script.write(script_body.encode('utf-8'))
         script.flush()
         c = subprocess.run(
-            [args.vm, *(['-vm-display-null'] if args.headless else []), 'squeak.image', script.name],
+            [args.vm, *([args.vm_headless_flag] if args.headless else []), 'squeak.image', script.name],
             check=True)
 
 def make_archive(output):
@@ -523,7 +523,7 @@ def command_run(args):
             subprocess.run(
                 [ *(['sudo', '--'] if args.root else []),
                   args.vm,
-                  *(['-vm-display-null'] if args.headless else []),
+                  *([args.vm_headless_flag] if args.headless else []),
                   'squeak.image',
                   *args.args],
                 check=True)
@@ -693,15 +693,26 @@ class CustomHandler(logging.StreamHandler):
         return super().emit(record)
 
 def discover_vm():
+    DEFAULT='squeak'
     try:
         if sys.platform == 'darwin':
             apps = sorted([n for n in os.listdir('/Applications')
                            if 'squeak' in n.lower() and n.endswith('.app')])
             return '/Applications/' + apps[-1] + '/Contents/MacOS/Squeak'
         else:
-            return 'squeak'
+            return DEFAULT
     except:
-        return 'squeak'
+        return DEFAULT
+
+def discover_headless_flag():
+    DEFAULT='-vm-display-null'
+    try:
+        if sys.platform == 'darwin':
+            return '-headless'
+        else:
+            return DEFAULT
+    except:
+        return DEFAULT
 
 def main(argv):
     app_name = os.path.basename(argv[0])
@@ -712,6 +723,8 @@ def main(argv):
                         help='Enable debug logging')
     parser.add_argument('-v', '--verbose', action='count', default=0,
                         help='Increment verbosity level')
+    parser.add_argument('--vm-headless-flag', type=str, default=discover_headless_flag(),
+                        help=argparse.SUPPRESS)
     parser.set_defaults(handler=lambda args: parser.print_help())
     sp = parser.add_subparsers()
 

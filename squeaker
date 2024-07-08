@@ -503,6 +503,15 @@ def prune_recent_changes():
     for filename in changesfiles[:-5]:
         unlink_missing_ok(os.path.join(changesdir, filename))
 
+def utcstamp():
+    # utcnow() is deprecated and scheduled to be removed in some future python
+    # see https://discuss.python.org/t/deprecating-utcnow-and-utcfromtimestamp/26221/5
+    #
+    # return datetime.datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    #
+    d = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return d.isoformat(timespec='seconds') + 'Z'
+
 def command_run(args):
     info = resolve_snapshot_name(args.image)
     old_cwd = os.getcwd()
@@ -520,7 +529,7 @@ def command_run(args):
                 check=True)
         finally:
             try:
-                n = 'squeak.' + datetime.datetime.utcnow().isoformat(timespec='seconds') + 'Z.changes'
+                n = 'squeak.' + utcstamp() + '.changes'
                 shutil.move('squeak.changes', os.path.join(ensurecachedir('recentchanges'), n))
                 prune_recent_changes()
             finally:
@@ -683,6 +692,17 @@ class CustomHandler(logging.StreamHandler):
             self.terminator = '\n'
         return super().emit(record)
 
+def discover_vm():
+    try:
+        if sys.platform == 'darwin':
+            apps = sorted([n for n in os.listdir('/Applications')
+                           if 'squeak' in n.lower() and n.endswith('.app')])
+            return '/Applications/' + apps[-1] + '/Contents/MacOS/Squeak'
+        else:
+            return 'squeak'
+    except:
+        return 'squeak'
+
 def main(argv):
     app_name = os.path.basename(argv[0])
     argv = argv[1:]
@@ -704,21 +724,25 @@ def main(argv):
                    help='Always redownload from URLs')
     p.add_argument('--no-cache-stages', dest='no_cache', action='append_const', const='stage',
                    help='Always recompute build stages')
-    p.add_argument('--no-headless', dest='headless', action='store_false', default=True,
+    p.add_argument('--headless', action='store_true', default=True,
+                   help='Run squeak with a dummy display, not showing the window')
+    p.add_argument('--no-headless', dest='headless', action='store_false',
                    help='Run squeak in graphical mode, showing the window')
-    p.add_argument('--vm', type=str, default='squeak',
+    p.add_argument('--vm', type=str, default=discover_vm(),
                    help='Specify VM executable name')
     p.add_argument('directory', type=str,
                    help='Directory to build the image in')
     p.set_defaults(no_cache=[], handler=command_build)
 
     p = sp.add_parser('run', help='Run image')
-    p.add_argument('--vm', type=str, default='squeak',
+    p.add_argument('--vm', type=str, default=discover_vm(),
                    help='Specify VM executable name')
     p.add_argument('--root', action='store_true', default=False,
                    help='Execute VM within `sudo`')
     p.add_argument('--headless', action='store_true', default=False,
                    help='Run squeak with a dummy display, not showing the window')
+    p.add_argument('--no-headless', dest='headless', action='store_false',
+                   help='Run squeak in graphical mode, showing the window')
     p.add_argument('image')
     p.add_argument('args', nargs=argparse.REMAINDER)
     p.set_defaults(handler=command_run)

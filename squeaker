@@ -676,6 +676,10 @@ def command_unstage(args):
             print(os.path.basename(path))
             unlink_missing_ok(path)
 
+def command_print_autodetect(args):
+    print(f'vm-headless-flag\t{args.vm_headless_flag}')
+    print(f'vm\t{args.vm if hasattr(args, 'vm') else discover_vm()}')
+
 class CustomHandler(logging.StreamHandler):
     def emit(self, record):
         if record.msg[0] == '\r':
@@ -795,6 +799,9 @@ def main(argv):
     p = sp.add_parser('unstage', help='Remove cached stages')
     p.add_argument('digest', nargs='*')
     p.set_defaults(handler=command_unstage)
+
+    p = sp.add_parser('print-autodetect', help='Show autodetected settings')
+    p.set_defaults(handler=command_print_autodetect)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,

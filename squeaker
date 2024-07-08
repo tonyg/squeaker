@@ -281,16 +281,24 @@ def escape_str(chunk):
 def incorporate_chunk(args, chunk):
     script_body = f'''
 [
-    | oldRedirect buildDir logAndQuit |
+    | oldRedirect errFile outFile buildDir logAndQuit |
+
+    "macOS stderr etc. doesn't work (2024-07-08) so use real files instead"
+    errFile := FileStream forceNewFileNamed: 'errors.txt'.
+    outFile := FileStream forceNewFileNamed: 'output.txt'.
+    oldRedirect := TranscriptStream redirectToStdOut.
+    FileStream stderr become: errFile.
+    FileStream stdout become: outFile.
+
     buildDir := FileStream detectFile: [FileStream readOnlyFileNamed: 'squeakerDirectory'] do: [:f | f upToEnd].
     FileDirectory setDefaultDirectory: buildDir.
-    oldRedirect := TranscriptStream redirectToStdOut.
-    TranscriptStream redirectToStdOut: true.
+
     logAndQuit := [:exn |
         FileStream stderr nextPut: Character cr.
         exn printVerboseOn: FileStream stderr.
         FileStream stderr flush.
         Smalltalk snapshot: false andQuitWithExitCode: 1].
+
     [
         (
             [
@@ -303,19 +311,33 @@ def incorporate_chunk(args, chunk):
             ]
         ) value
     ] on: UnhandledError do: [:exn | logAndQuit value: exn exception].
+
     Transcript flush.
+    FileStream stderr become: errFile. errFile flush; close.
+    FileStream stdout become: outFile. outFile flush; close.
     TranscriptStream redirectToStdOut: oldRedirect.
+
     Smalltalk garbageCollect; snapshot: true andQuit: true.
 ] forkAt: Processor lowestPriority + 1 "plus one to avoid having the idle process starve us".
 '''
     with open('squeakerDirectory', 'wt') as squeakerDirectory:
         squeakerDirectory.write(args.directory)
-    with tempfile.NamedTemporaryFile(prefix='chunk-', suffix='.st') as script:
-        script.write(script_body.encode('utf-8'))
-        script.flush()
-        c = subprocess.run(
-            [args.vm, *([args.vm_headless_flag] if args.headless else []), 'squeak.image', script.name],
-            check=True)
+    try:
+        with tempfile.NamedTemporaryFile(prefix='chunk-', suffix='.st') as script:
+            script.write(script_body.encode('utf-8'))
+            script.flush()
+            c = subprocess.run(
+                [args.vm, *([args.vm_headless_flag] if args.headless else []), 'squeak.image', script.name],
+                check=True)
+    finally:
+        with open('errors.txt', 'rt') as f:
+            errors = f.read()
+            if errors:
+                logging.error(errors.replace('\r', '\n'))
+        with open('output.txt', 'rt') as f:
+            output = f.read()
+            if output:
+                logging.info(output.replace('\r', '\n'))
 
 def make_archive(output):
     with zipfile.ZipFile(output, mode='w', compression=zipfile.ZIP_DEFLATED) as z:

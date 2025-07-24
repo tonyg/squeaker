@@ -22,6 +22,7 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import argparse
 import datetime
@@ -62,6 +63,31 @@ def digest_file(path):
             if not buf:
                 return d.hexdigest()
             d.update(buf)
+
+class DigestWriter:
+    def __init__(self, d):
+        self.digest = d
+
+    def write(self, chunk):
+        self.digest.update(chunk)
+
+    def hexdigest(self):
+        return self.digest.hexdigest()
+
+def digest_file_or_url(path):
+    if urlparse(path).scheme == '':
+        return digest_file(path) if os.path.exists(path) else None
+
+    req = Request(path)
+    resp = urlopen(req)
+    if resp.status >= 200 and resp.status <= 299:
+        d = DigestWriter(hashlib.sha512())
+        copy_with_progress(expected_str=resp.headers['content-length'], from_fh=resp, to_fh=d, extra=f' checksumming {path}')
+        return d.hexdigest()
+    elif resp.status == 404:
+        return None
+    else:
+        raise Exception(f'Could not checksum {path}: HTTP response code {resp.status}:\n{resp.headers}')
 
 def digest_digests(digests):
     d = hashlib.sha512()
@@ -388,11 +414,7 @@ def depend_on_resource(args, base_stage, resource_path):
     #
     base_stage = [base_stage]
 
-    if os.path.exists(resource_path):
-        resource_digest = digest_file(resource_path)
-    else:
-        resource_digest = None
-
+    resource_digest = digest_file_or_url(resource_path)
     digest_inputs_fn = lambda: [base_stage[0]['stage_digest'],
                                 base_stage[0]['image_digest'],
                                 *([resource_digest] if resource_digest else [])]

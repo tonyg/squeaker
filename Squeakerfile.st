@@ -1,1 +1,1 @@
-from: 'http://files.squeak.org/6.1alpha/Squeak6.1alpha-23140-64bit/Squeak6.1alpha-23140-64bit.zip'!
+from: 'http://files.squeak.org/6.1alpha/Squeak6.1alpha-23301-64bit/Squeak6.1alpha-23301-64bit.zip'!
